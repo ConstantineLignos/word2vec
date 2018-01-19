@@ -743,5 +743,6 @@ int main(int argc, char **argv) {
   DestroyNet();
   free(vocab_hash);
   free(expTable);
+  printf("\n");
   return 0;
 }
