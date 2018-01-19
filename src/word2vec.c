@@ -18,7 +18,8 @@
 #include <math.h>
 #include <pthread.h>
 
-#define LOWFREQ_TRAINING_DEBUG 1
+#define DEBUG_LOWFREQ_TRAINING 0
+#define DEBUG_LOAD_WEIGHTS 0
 
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
@@ -38,6 +39,11 @@ struct vocab_word {
   bool highfreq; // Whether this is considered high frequency
 };
 
+struct loaded_weights {
+  char *word;
+  real *weights;
+};
+
 char train_file[MAX_STRING], output_file[MAX_STRING];
 char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
 struct vocab_word *vocab;
@@ -55,6 +61,8 @@ int *table;
 
 // Additions
 long long freq_cutoff = -1;
+char load_weights_file[MAX_STRING];
+bool skip_training = false;
 
 void InitUnigramTable() {
   int a, i;
@@ -176,6 +184,9 @@ void SortVocab() {
   unsigned int hash;
   // Sort the vocabulary and keep </s> at the first position
   qsort(&vocab[1], vocab_size - 1, sizeof(struct vocab_word), VocabCompare);
+  // Set </s> to highfreq if needed. It is skipped in the normal loop below
+  vocab[0].highfreq = 0 < freq_cutoff;
+  
   for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
   size = vocab_size;
   train_words = 0;
@@ -369,8 +380,95 @@ void ReadVocab() {
   fclose(fin);
 }
 
+
+void ScanToEndOfLine(FILE *fin) {
+  // Skip anything else on line
+  int ch;
+  while (!feof(fin)) {
+    ch = fgetc(fin);
+    if (ch == '\n') {
+      return;
+    }
+  }
+}
+
+struct loaded_weights *LoadWeights() {
+  char word[MAX_STRING], weight[MAX_STRING];
+  FILE *fin;
+  long long a, i, num_words, hidden_size;
+  struct loaded_weights *current, *weights;
+  real *new_weights;
+  fin = fopen(load_weights_file, "r");
+  if (fin == NULL) {
+    printf("ERROR: could not open weights file %s\n", load_weights_file);
+    exit(1);
+  }
+
+  // Verify size of loaded weights matches what we expect
+  ReadWord(word, fin);
+  num_words = atoi(word);
+  ReadWord(word, fin);
+  hidden_size = atoi(word);
+  ScanToEndOfLine(fin);
+  if (num_words != vocab_size) {
+    fprintf(stderr, "Vocab size %lld does not match value %lld in weights file\n", vocab_size, num_words);
+    exit(1);
+  }
+  if (hidden_size != layer1_size) {
+    fprintf(stderr, "Hidden layer size %lld does not match value %lld in weights file\n", layer1_size, hidden_size);
+    exit(1);
+  }
+
+  // Allocate space for the weights
+  weights = calloc(vocab_size, sizeof(struct loaded_weights));
+  if (weights == NULL) {
+    fprintf(stderr, "cannot allocate memory for loading weights\n");
+    exit(1);
+  }
+
+  a = 0;
+  while (1) {
+    // Load word itself
+    ReadWord(word, fin);
+    if (feof(fin)) break;
+
+    // If we hit this before EOF, something is wrong
+    if (a >= vocab_size) {
+      fprintf(stderr, "weights file is longer than vocabulary\n");
+      exit(1);
+    }
+
+    // Allocate new word
+    current = &weights[a++];
+
+    // Load weights
+    new_weights = calloc(layer1_size, sizeof(real));
+    for (i = 0; i < layer1_size; i++) {
+      ReadWord(weight, fin);
+      new_weights[i] = atof(weight);
+    }
+    ScanToEndOfLine(fin);
+
+    // Populate struct
+    current->word = calloc(strlen(word) + 1, sizeof(char));
+    strcpy(current->word, word);
+    current->weights = new_weights;
+
+    if (DEBUG_LOAD_WEIGHTS) {
+      printf("%s ", current->word);
+      for (i = 0; i < hidden_size; i++) {
+        printf("%f ", current->weights[i]);
+      }
+      printf("\n");
+    }
+  }
+
+  return weights;
+}
+
 void InitNet() {
   long long a, b;
+  struct loaded_weights *input_weights, *current_weights;
   // Allocate input layer
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
@@ -383,15 +481,39 @@ void InitNet() {
      syn1[a * layer1_size + b] = 0;
   }
   if (negative>0) {
-    // Not on by default, don't worry about it
+    // Allocate negative sampling
     a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * layer1_size * sizeof(real));
     if (syn1neg == NULL) {printf("Memory allocation failed\n"); exit(1);}
+    // Initialize to zero
     for (b = 0; b < layer1_size; b++) for (a = 0; a < vocab_size; a++)
      syn1neg[a * layer1_size + b] = 0;
   }
-  // Initialize input layer, uniform between -0.5 and 0.5, normalized to layer size
-  for (b = 0; b < layer1_size; b++) for (a = 0; a < vocab_size; a++)
-   syn0[a * layer1_size + b] = (rand() / (real)RAND_MAX - 0.5) / layer1_size;
+  // Initialize input layer
+  if (load_weights_file[0] != 0) {
+    // Load from file
+    input_weights = LoadWeights();
+    // Initalize
+    for (a = 0; a < vocab_size; a++) {
+      current_weights = &input_weights[a];
+      for (b = 0; b < layer1_size; b++) {
+	if (vocab[a].highfreq) {
+	  // High frequency words use the loaded values
+	  syn0[a * layer1_size + b] = current_weights->weights[b];
+	} else {
+	  // Low frequeny cords use the random values
+          syn0[a * layer1_size + b] = (rand() / (real)RAND_MAX - 0.5) / layer1_size;
+	}
+      }
+      // Free the struct's memory
+      free(current_weights->word);
+      free(current_weights->weights);
+    }
+    free(input_weights);
+  } else {
+    // Default: uniform between -0.5 and 0.5, normalized to layer size
+    for (b = 0; b < layer1_size; b++) for (a = 0; a < vocab_size; a++)
+      syn0[a * layer1_size + b] = (rand() / (real)RAND_MAX - 0.5) / layer1_size;
+  }
   CreateBinaryTree();
 }
 
@@ -564,12 +686,11 @@ void *TrainModelThread(void *id) {
           for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
           for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1];
         }
-	// TODO: Conditionally disable update
-	// Implement by using array to zero/one for each vocab item
         // Learn weights input -> hidden
+	// Only allow update for non-highfreq words
 	if (!vocab[word].highfreq) {
           for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
-	} else if (LOWFREQ_TRAINING_DEBUG) {
+	} else if (DEBUG_LOWFREQ_TRAINING) {
 	  printf("Skipping %s\n", vocab[word].word);
 	}
       }
@@ -602,8 +723,10 @@ void TrainModel() {
   InitNet();
   if (negative > 0) InitUnigramTable();
   start = clock();
-  for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
-  for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
+  if (!skip_training) {
+    for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
+    for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
+  }
   fo = fopen(output_file, "wb");
   if (fo == NULL) {
     fprintf(stderr, "Cannot open %s: permission denied\n", output_file);
@@ -728,7 +851,10 @@ int main(int argc, char **argv) {
     printf("\t-cbow <int>\n");
     printf("\t\tUse the continuous back of words model; default is 0 (skip-gram model)\n");
     printf("\t-freq_cutoff <int>\n");
-    printf("\t\tSkip input layer updates for words with rank below <int>; default is -1 (normal training)\n");    
+    printf("\t\tSkip input layer updates for words with rank below <int>; default is -1 (normal training)\n");
+    printf("\t-skip-training <int>\n");
+    printf("\t\tSkip training in order to debug initialization; default is 0 (normal training, 1 = skip)\n");
+    
     printf("\nExamples:\n");
     printf("./word2vec -train data.txt -output vec.txt -debug 2 -size 200 -window 5 -sample 1e-4 -negative 5 -hs 0 -binary 0 -cbow 1\n\n");
     return 0;
@@ -736,10 +862,12 @@ int main(int argc, char **argv) {
   output_file[0] = 0;
   save_vocab_file[0] = 0;
   read_vocab_file[0] = 0;
+  load_weights_file[0] = 0;
   if ((i = ArgPos((char *)"-size", argc, argv)) > 0) layer1_size = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-train", argc, argv)) > 0) strcpy(train_file, argv[i + 1]);
   if ((i = ArgPos((char *)"-save-vocab", argc, argv)) > 0) strcpy(save_vocab_file, argv[i + 1]);
   if ((i = ArgPos((char *)"-read-vocab", argc, argv)) > 0) strcpy(read_vocab_file, argv[i + 1]);
+  if ((i = ArgPos((char *)"-load-weights", argc, argv)) > 0) strcpy(load_weights_file, argv[i + 1]);
   if ((i = ArgPos((char *)"-debug", argc, argv)) > 0) debug_mode = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-binary", argc, argv)) > 0) binary = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0) cbow = atoi(argv[i + 1]);
@@ -753,6 +881,7 @@ int main(int argc, char **argv) {
   if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-freq_cutoff", argc, argv)) > 0) freq_cutoff = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-skip-training", argc, argv)) > 0) skip_training = atoi(argv[i + 1]);
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
   expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
