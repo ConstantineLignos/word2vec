@@ -18,6 +18,8 @@
 #include <math.h>
 #include <pthread.h>
 
+#define LOWFREQ_TRAINING_DEBUG 1
+
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
@@ -27,11 +29,13 @@
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
 typedef float real;                    // Precision of float numbers
+typedef enum { false, true } bool; // Added for convenience
 
 struct vocab_word {
-  long long cn;
+  long long cn; // Count
   int *point;
   char *word, *code, codelen;
+  bool highfreq; // Whether this is considered high frequency
 };
 
 char train_file[MAX_STRING], output_file[MAX_STRING];
@@ -48,6 +52,9 @@ clock_t start;
 int hs = 1, negative = 0;
 const int table_size = 1e8;
 int *table;
+
+// Additions
+long long freq_cutoff = -1;
 
 void InitUnigramTable() {
   int a, i;
@@ -179,6 +186,10 @@ void SortVocab() {
       free(vocab[a].word);
       vocab[a].word = NULL;
     } else {
+      // Mark high-frequency words as such. Since they are excluded from update,
+      // if this feature is not in use, nothing should be considered high frequency
+      vocab[a].highfreq = a < freq_cutoff;
+
       // Hash will be re-computed, as after the sorting it is not actual
       hash=GetWordHash(vocab[a].word);
       while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
@@ -360,20 +371,25 @@ void ReadVocab() {
 
 void InitNet() {
   long long a, b;
+  // Allocate input layer
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   if (hs) {
+    // Allocate output layer
     a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * layer1_size * sizeof(real));
     if (syn1 == NULL) {printf("Memory allocation failed\n"); exit(1);}
+    // Initialize output layer, always to zero. (Why zero?
     for (b = 0; b < layer1_size; b++) for (a = 0; a < vocab_size; a++)
      syn1[a * layer1_size + b] = 0;
   }
   if (negative>0) {
+    // Not on by default, don't worry about it
     a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * layer1_size * sizeof(real));
     if (syn1neg == NULL) {printf("Memory allocation failed\n"); exit(1);}
     for (b = 0; b < layer1_size; b++) for (a = 0; a < vocab_size; a++)
      syn1neg[a * layer1_size + b] = 0;
   }
+  // Initialize input layer, uniform between -0.5 and 0.5, normalized to layer size
   for (b = 0; b < layer1_size; b++) for (a = 0; a < vocab_size; a++)
    syn0[a * layer1_size + b] = (rand() / (real)RAND_MAX - 0.5) / layer1_size;
   CreateBinaryTree();
@@ -548,8 +564,14 @@ void *TrainModelThread(void *id) {
           for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
           for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1];
         }
+	// TODO: Conditionally disable update
+	// Implement by using array to zero/one for each vocab item
         // Learn weights input -> hidden
-        for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
+	if (!vocab[word].highfreq) {
+          for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
+	} else if (LOWFREQ_TRAINING_DEBUG) {
+	  printf("Skipping %s\n", vocab[word].word);
+	}
       }
     }
     sentence_position++;
@@ -705,6 +727,8 @@ int main(int argc, char **argv) {
     printf("\t\tThe vocabulary will be read from <file>, not constructed from the training data\n");
     printf("\t-cbow <int>\n");
     printf("\t\tUse the continuous back of words model; default is 0 (skip-gram model)\n");
+    printf("\t-freq_cutoff <int>\n");
+    printf("\t\tSkip input layer updates for words with rank below <int>; default is -1 (normal training)\n");    
     printf("\nExamples:\n");
     printf("./word2vec -train data.txt -output vec.txt -debug 2 -size 200 -window 5 -sample 1e-4 -negative 5 -hs 0 -binary 0 -cbow 1\n\n");
     return 0;
@@ -728,6 +752,7 @@ int main(int argc, char **argv) {
   if ((i = ArgPos((char *)"-threads", argc, argv)) > 0) num_threads = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-freq_cutoff", argc, argv)) > 0) freq_cutoff = atoi(argv[i + 1]);
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
   expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
