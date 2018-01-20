@@ -512,7 +512,7 @@ void InitNet() {
       printf("Memory allocation failed\n");
       exit(1);
     }
-    // Initialize output layer, always to zero. (Why zero?
+    // Initialize output layer, always to zero.
     for (b = 0; b < layer1_size; b++)
       for (a = 0; a < vocab_size; a++)
         syn1[a * layer1_size + b] = 0;
@@ -541,7 +541,7 @@ void InitNet() {
           // High frequency words use the loaded values
           syn0[a * layer1_size + b] = current_weights->weights[b];
         } else {
-          // Low frequeny cords use the random values
+          // Low frequency words use the random values
           syn0[a * layer1_size + b] = (rand() / (real) RAND_MAX - 0.5) / layer1_size;
         }
       }
@@ -733,7 +733,7 @@ void *TrainModelThread(void *id) {
           for (c = 0; c < layer1_size; c++)
             neu1e[c] = 0;
           // HIERARCHICAL SOFTMAX
-          if (hs)
+          if (hs) {
             for (d = 0; d < vocab[word].codelen; d++) {
               f = 0;
               l2 = vocab[word].point[d] * layer1_size;
@@ -755,8 +755,9 @@ void *TrainModelThread(void *id) {
               for (c = 0; c < layer1_size; c++)
                 syn1[c + l2] += g * syn0[c + l1];
             }
+          }
           // NEGATIVE SAMPLING
-          if (negative > 0)
+          if (negative > 0) {
             for (d = 0; d < negative + 1; d++) {
               if (d == 0) {
                 target = word;
@@ -785,9 +786,12 @@ void *TrainModelThread(void *id) {
               for (c = 0; c < layer1_size; c++)
                 syn1neg[c + l2] += g * syn0[c + l1];
             }
+          }
           // Learn weights input -> hidden
           // Only allow update for non-highfreq words
-          if (!vocab[word].highfreq) {
+          // Since the update is on the word with index l1, it's actually last_word
+          // that's receiving the update.
+          if (!vocab[last_word].highfreq) {
             for (c = 0; c < layer1_size; c++)
               syn0[c + l1] += neu1e[c];
           } else if (DEBUG_LOWFREQ_TRAINING) {
