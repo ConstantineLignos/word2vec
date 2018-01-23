@@ -987,7 +987,7 @@ int main(int argc, char **argv) {
     printf("\t\tThe vocabulary will be read from <file>, not constructed from the training data\n");
     printf("\t-cbow <int>\n");
     printf("\t\tUse the continuous back of words model; default is 0 (skip-gram model)\n");
-    printf("\t-freq_cutoff <int>\n");
+    printf("\t-freq-cutoff <int>\n");
     printf("\t\tSkip input layer updates for words with rank below <int>; default is -1 (normal training)\n");
     printf("\t-skip-training <int>\n");
     printf("\t\tSkip training in order to debug initialization; default is 0 (normal training, 1 = skip)\n");
@@ -1034,7 +1034,7 @@ int main(int argc, char **argv) {
     min_count = atoi(argv[i + 1]);
   if ((i = ArgPos((char *) "-classes", argc, argv)) > 0)
     classes = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *) "-freq_cutoff", argc, argv)) > 0)
+  if ((i = ArgPos((char *) "-freq-cutoff", argc, argv)) > 0)
     freq_cutoff = atoi(argv[i + 1]);
   if ((i = ArgPos((char *) "-skip-training", argc, argv)) > 0)
     skip_training = atoi(argv[i + 1]);
