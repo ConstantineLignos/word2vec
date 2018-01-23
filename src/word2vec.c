@@ -427,6 +427,9 @@ struct loaded_weights *LoadWeights() {
   long long a, i, num_words, hidden_size;
   struct loaded_weights *current, *weights;
   real *new_weights;
+
+  printf("Loading weights from %s\n", load_weights_file);
+  fflush(stdout);
   fin = fopen(load_weights_file, "r");
   if (fin == NULL) {
     printf("ERROR: could not open weights file %s\n", load_weights_file);
@@ -536,12 +539,20 @@ void InitNet() {
     // Initalize
     for (a = 0; a < vocab_size; a++) {
       current_weights = &input_weights[a];
-      for (b = 0; b < layer1_size; b++) {
-        if (vocab[a].highfreq) {
-          // High frequency words use the loaded values
+      if (freq_cutoff == -1 || vocab[a].highfreq) {
+        // High frequency words use the loaded values if the cutoff was used
+        if (DEBUG_LOAD_WEIGHTS) {
+          printf("Using loaded weights for %s\n", vocab[a].word);
+        }
+        for (b = 0; b < layer1_size; b++) {
           syn0[a * layer1_size + b] = current_weights->weights[b];
-        } else {
-          // Low frequency words use the random values
+        }
+      } else {
+        // Low frequency words use the random values
+        if (DEBUG_LOAD_WEIGHTS) {
+          printf("Using random weights for %s\n", vocab[a].word);
+        }
+        for (b = 0; b < layer1_size; b++) {
           syn0[a * layer1_size + b] = (rand() / (real) RAND_MAX - 0.5) / layer1_size;
         }
       }
@@ -555,6 +566,9 @@ void InitNet() {
     for (b = 0; b < layer1_size; b++)
       for (a = 0; a < vocab_size; a++)
         syn0[a * layer1_size + b] = (rand() / (real) RAND_MAX - 0.5) / layer1_size;
+  }
+  if (DEBUG_LOAD_WEIGHTS) {
+    fflush(stdout);
   }
   CreateBinaryTree();
 }
